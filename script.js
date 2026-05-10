@@ -7,19 +7,19 @@ const QUESTIONS = [
   {
     id: 1,
     instruction:
-      '탄소(C) 원자 모형을 그려보세요. 양성자, 중성자, 전자를 표현해 보세요.',
+      '탄소(C) 원자 모형을 그려보세요. 원자핵(양성자·중성자)과 전자의 위치를 표현해주세요.',
     bg: null,
   },
   {
     id: 2,
     instruction:
-      '리튬(Li) 원자가 리튬 이온이 되는 과정을 그림으로 표현해 보세요.',
+      '리튬(Li) 원자가 리튬 이온(Li⁺)이 되는 과정을 그림으로 표현해보세요. 전자의 변화에 주목하세요.',
     bg: 'pic2.png',
   },
   {
     id: 3,
     instruction:
-      '황산 구리( II ) 수용액에 전류를 흘려 주면 어떤 변화가 나타날지 표현하고, 그 이유를 구리 이온과 황산 이온 모형을 그려 설명해 보세요.',
+      '황산 구리(II) 수용액에 전류를 흘렸을 때 이온의 이동 방향을 그림으로 나타내보세요. 구리 이온과 황산 이온이 각각 어느 극으로 이동하는지 표현해주세요.',
     bg: 'pic3.png',
   },
 ];
@@ -65,8 +65,6 @@ const el = {
   bgCanvas: document.getElementById('bgCanvas'),
   drawCanvas: document.getElementById('drawCanvas'),
   textAnswer: document.getElementById('textAnswer'),
-  bgStatus: document.getElementById('bgStatus'),
-  saveStatus: document.getElementById('saveStatus'),
   btnNext: document.getElementById('btnNext'),
   btnSubmit: document.getElementById('btnSubmit'),
 
@@ -76,6 +74,7 @@ const el = {
   btnRestart: document.getElementById('btnRestart'),
 
   toast: document.getElementById('toast'),
+  submitOverlay: document.getElementById('submitOverlay'),
 };
 
 // === Toast ===
@@ -85,6 +84,12 @@ function showToast(msg) {
   el.toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.toast.classList.remove('show'), 1700);
+}
+
+function setSubmitOverlay(on) {
+  if (!el.submitOverlay) return;
+  el.submitOverlay.classList.toggle('show', !!on);
+  el.submitOverlay.setAttribute('aria-hidden', on ? 'false' : 'true');
 }
 
 // === Screen control ===
@@ -272,7 +277,6 @@ function setColor(color) {
     b.classList.toggle('active', b.dataset.color === color)
   );
   if (drawing.tool !== 'pen') setTool('pen');
-  showToast('색상 변경');
 }
 el.colorButtons.forEach((btn) =>
   btn.addEventListener('click', () => setColor(btn.dataset.color))
@@ -285,15 +289,8 @@ el.btnClearAll.addEventListener('click', () => {
 });
 
 // === Auto-save indicators ===
-let saveBlinkTimer = null;
 function markAutoSaved() {
-  el.saveStatus.textContent = '자동 저장됨';
-  el.saveStatus.style.color = 'var(--muted)';
-  clearTimeout(saveBlinkTimer);
-  saveBlinkTimer = setTimeout(() => {
-    el.saveStatus.textContent = '자동 저장됨';
-    el.saveStatus.style.color = 'var(--muted)';
-  }, 600);
+  // 상태 표시 UI 제거됨 (의도적으로 no-op)
 }
 
 // === Background image handling (full cover drawImage) ===
@@ -303,12 +300,9 @@ function loadBackground(src) {
   drawing.bgImg = null;
 
   if (!src) {
-    el.bgStatus.textContent = '배경: 없음';
     redrawBackground();
     return;
   }
-
-  el.bgStatus.textContent = '배경: 불러오는 중...';
 
   // 요청하신 방식 그대로
   const img = new Image();
@@ -316,13 +310,11 @@ function loadBackground(src) {
   img.onload = () => {
     if (token !== drawing.bgLoadToken) return; // 문항 전환 중 뒤늦은 onload 무시
     drawing.bgImg = img;
-    el.bgStatus.textContent = `배경: ${src}`;
     redrawBackground();
   };
   img.onerror = () => {
     if (token !== drawing.bgLoadToken) return;
     drawing.bgImg = null;
-    el.bgStatus.textContent = `배경: ${src} (파일 없음)`;
     redrawBackground();
     showToast('배경 이미지를 찾을 수 없어요');
   };
@@ -338,16 +330,20 @@ function persistCurrentAnswer() {
 function restoreDrawingFromDataUrl(dataUrl) {
   if (!dataUrl) {
     clearDrawingLayer(true);
-    return;
+    return Promise.resolve();
   }
-  const img = new Image();
-  img.onload = () => {
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.drawImage(img, 0, 0, el.drawCanvas.width, el.drawCanvas.height);
-    ctx.restore();
-  };
-  img.src = dataUrl;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      ctx.save();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(img, 0, 0, el.drawCanvas.width, el.drawCanvas.height);
+      ctx.restore();
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = dataUrl;
+  });
 }
 
 function compositeCurrentPngDataUrl() {
@@ -361,36 +357,6 @@ function compositeCurrentPngDataUrl() {
   return out.toDataURL('image/png');
 }
 
-function compositePngForQuestion(qNum) {
-  const q = clampQ(qNum);
-  const qInfo = QUESTIONS[q - 1];
-
-  const out = document.createElement('canvas');
-  out.width = el.bgCanvas.width || 1;
-  out.height = el.bgCanvas.height || 1;
-  const octx = out.getContext('2d');
-
-  // white
-  octx.fillStyle = '#ffffff';
-  octx.fillRect(0, 0, out.width, out.height);
-
-  // background (if loaded right now for this question it will be used; otherwise draw via image load later is not needed for submission)
-  // For reliable output, draw background by loading the file synchronously is impossible,
-  // so we instead render the bg by recreating it when the question is active.
-  // We call this function after renderQuestion, so bgCanvas already contains correct background.
-  if (state.current === q) {
-    octx.drawImage(el.bgCanvas, 0, 0);
-  }
-
-  // drawing layer saved
-  const drawData = state.answers[q].image;
-  if (!drawData) return out.toDataURL('image/png');
-
-  // draw layer from dataURL
-  // (sync draw is not possible; we return placeholder and caller should use compositeCurrentPngDataUrl for active q)
-  // To keep API simple, we avoid this path and handle payload by visiting each question sequentially.
-  return drawData;
-}
 
 function renderQuestion(qIndex) {
   const idx = clampQ(qIndex);
@@ -413,8 +379,6 @@ function renderQuestion(qIndex) {
     const savedDraw = state.answers[idx].image;
     if (savedDraw) restoreDrawingFromDataUrl(savedDraw);
     else clearDrawingLayer(true);
-
-    persistCurrentAnswer();
   });
 
   setHeaderBadge(`문항 ${idx} 진행 중`);
@@ -457,12 +421,12 @@ el.btnDemo.addEventListener('click', () => {
   el.inputName.value = '홍길동';
   el.inputStudentId.value = '20301';
   validateStart();
-  showToast('예시를 채웠어요');
+  showToast('예시 입력 완료!');
 });
 
 el.btnStart.addEventListener('click', () => {
   if (!validateStart()) {
-    showToast('이름과 학번을 모두 입력하세요');
+    showToast('이름과 학번을 먼저 입력해 주세요');
     return;
   }
   state.name = el.inputName.value.trim();
@@ -474,7 +438,7 @@ el.btnBackToStart.addEventListener('click', () => {
   persistCurrentAnswer();
   if (
     confirm(
-      '메인으로 돌아가면 진행 중인 내용은 유지되지만, 화면이 이동합니다. 돌아갈까요?'
+      '메인으로 돌아갈까요? (지금까지 그린 내용은 그대로 저장돼요)'
     )
   ) {
     goToStart();
@@ -484,7 +448,6 @@ el.btnBackToStart.addEventListener('click', () => {
 // Save text live
 el.textAnswer.addEventListener('input', () => {
   state.answers[clampQ(state.current)].text = el.textAnswer.value || '';
-  el.saveStatus.textContent = '자동 저장됨';
   persistCurrentAnswer();
 });
 
@@ -494,8 +457,9 @@ el.btnNext.addEventListener('click', () => {
   const current = clampQ(state.current);
   const next = current + 1;
   if (next > Q_TOTAL) return;
+  const josa = next === 3 ? '으로' : '로';
+  showToast(`문항 ${next}${josa} 이동합니다`);
   goToTask(next);
-  showToast(`문항 ${next}로 이동`);
 });
 
 // === Submit ===
@@ -528,38 +492,72 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-//클로드 배경 이미지 로드 수정
-async function waitForBackground(maxMs = 2000) {
-  const q = QUESTIONS[clampQ(state.current) - 1];
-  if (!q.bg) return;
-  const start = Date.now();
-  while (!drawing.bgImg || !drawing.bgImg.complete) {
-    if (Date.now() - start > maxMs) break;
-    await sleep(10);
-  }
-  await sleep(30);
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image_load_failed'));
+    img.src = src;
+  });
 }
 
+// 근본 해결: "화면 전환 없이" 문항별 저장값으로 오프스크린 합성 캡처
 async function captureCompositeForQuestion(qNum) {
-  // 해당 문항을 활성화해서 배경이 실제로 그려진 상태에서 합성 캡처
-  goToTask(qNum);
-  // 다음 프레임 + 이미지 onload까지 잠깐 여유
+  const q = clampQ(qNum);
+  const info = QUESTIONS[q - 1];
+
+  const w = el.drawCanvas.width || 1600;
+  const h = el.drawCanvas.height || 1000;
+
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext('2d');
+
+  // white base
+  octx.fillStyle = '#ffffff';
+  octx.fillRect(0, 0, w, h);
+
+  // background (full cover)
+  if (info.bg) {
+    try {
+      const bgImg = await loadImage(info.bg);
+      octx.drawImage(bgImg, 0, 0, w, h);
+    } catch (_e) {
+      // ignore (still submit white background)
+    }
+  }
+
+  // drawing layer for that question (transparent PNG)
+  const drawData = state.answers[q].image;
+  if (drawData) {
+    try {
+      const drawImg = await loadImage(drawData);
+      octx.drawImage(drawImg, 0, 0, w, h);
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  // 요구사항: restore 후 약간의 딜레이(캡처 안정화)
   await sleep(50);
-  // 배경 이미지가 있는 문항은 onload가 더 걸릴 수 있어 한번 더 여유
-  await waitForBackground();
-  return compositeCurrentPngDataUrl();
+
+  return out.toDataURL('image/png');
 }
 
 el.btnSubmit.addEventListener('click', async () => {
   persistCurrentAnswer();
 
   if (!state.name || !state.studentId) {
-    showToast('이름/학번 정보가 없어요. 메인으로 돌아가 다시 시작해 주세요.');
+    showToast('이름/학번이 없어요. 메인에서 다시 시작해 주세요.');
     return;
   }
 
+  if (!confirm('제출하면 수정이 어렵습니다. 제출하시겠어요?')) return;
+
   setSubmitting(true);
-  showToast('제출을 시작합니다');
+  setSubmitOverlay(true);
+  showToast('제출을 시작할게요');
 
   try {
     // 모든 문항을 "배경 포함 합성 이미지"로 캡처
@@ -568,13 +566,10 @@ el.btnSubmit.addEventListener('click', async () => {
       imagesByQ[q] = await captureCompositeForQuestion(q);
     }
 
-    // 제출은 문항 3에서 이뤄지므로 화면을 3으로 복귀
-    goToTask(3);
-
     const payload = buildPayload(imagesByQ);
 
     //클로드 제출 오류 수정
-    const res = await fetch(SCRIPT_URL, {
+    await fetch(SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload),
@@ -582,38 +577,26 @@ el.btnSubmit.addEventListener('click', async () => {
       cache: 'no-store',
     });
 
-    let text = '';
-    try {
-      text = await res.text();
-    } catch (_e) {}
-
-    if (!res.ok) {
-      throw new Error(
-        `HTTP ${res.status} ${res.statusText}${text ? ' - ' + text : ''}`
-      );
-    }
 
     // preview에서 합성본을 쓰기 위해 저장
     state.answers[1].__composite = imagesByQ[1];
     state.answers[2].__composite = imagesByQ[2];
     state.answers[3].__composite = imagesByQ[3];
 
-    goToDone('전송 성공! (서버 응답 수신)');
-    el.doneHint.textContent = text
-      ? `서버 응답: ${text}`
-      : '아래는 제출한 내용 미리보기입니다.';
+    goToDone('제출 완료! 수고했어요. 선생님께 전달되었어요.');
   } catch (err) {
     console.error(err);
     // 실패해도 미리보기는 합성 캡처(가능하면)로 보여주기
     state.answers[1].__composite = state.answers[1].__composite || '';
     state.answers[2].__composite = state.answers[2].__composite || '';
     state.answers[3].__composite = state.answers[3].__composite || '';
-    goToDone('전송 실패 (미리보기는 저장됨)');
+    goToDone('제출이 잘 안 됐어요');
     el.doneHint.textContent =
-      '서버로 전송에 실패했어요. 인터넷 연결 또는 구글 스크립트 권한(CORS/배포 설정)을 확인한 뒤 다시 시도해 주세요. 아래는 현재 저장된 미리보기입니다.';
+      '인터넷 연결을 확인하고 다시 제출해 보세요. 그래도 안 되면 선생님께 화면을 보여 주세요.';
     showToast('전송 실패');
   } finally {
     setSubmitting(false);
+    setSubmitOverlay(false);
   }
 });
 
